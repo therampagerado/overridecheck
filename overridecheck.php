@@ -1,6 +1,6 @@
 <?php
 /**
- * 2017 thirty bees
+ * 2017-2018 thirty bees
  *
  * NOTICE OF LICENSE
  *
@@ -13,13 +13,20 @@
  * to license@thirtybees.com so we can send you a copy immediately.
  *
  * @author    thirty bees <modules@thirtybees.com>
- * @copyright 2017 thirty bees
+ * @copyright 2017-2018 thirty bees
  * @license   http://opensource.org/licenses/afl-3.0.php  Academic Free License (AFL 3.0)
  */
+
+use OverrideCheckModule\OverrideVisitor;
+use ThirtyBeesOverrideCheck\PhpParser\NodeTraverser;
+use ThirtyBeesOverrideCheck\PhpParser\ParserFactory;
+use ThirtyBeesOverrideCheck\PhpParser\PrettyPrinter\Standard as StandardPrinter;
 
 if (!defined('_PS_VERSION_')) {
     exit;
 }
+
+require_once __DIR__.'/vendor/autoload.php';
 
 /**
  * Class OverrideCheck
@@ -28,12 +35,14 @@ class OverrideCheck extends Module
 {
     /**
      * OverrideCheck constructor.
+     *
+     * @throws PrestaShopException
      */
     public function __construct()
     {
         $this->name = 'overridecheck';
         $this->tab = 'administration';
-        $this->version = '1.0.0';
+        $this->version = '1.1.0';
         $this->author = 'thirty bees';
         $this->need_instance = 0;
         $this->bootstrap = true;
@@ -42,9 +51,10 @@ class OverrideCheck extends Module
 
         // Only check from Back Office
         if (isset(Context::getContext()->employee->id) && Context::getContext()->employee->id) {
-            if (version_compare(phpversion(), '5.3', '<')) {
-                $this->context->controller->errors[] = $this->displayName.': '.$this->l('Your PHP version is not supported. Please upgrade to PHP 5.3 or higher.');
+            if (version_compare(phpversion(), '5.5', '<')) {
+                $this->context->controller->errors[] = $this->displayName.': '.$this->l('Your PHP version is not supported. Please upgrade to PHP 5.5 or higher.');
                 $this->disable();
+
                 return;
             }
         }
@@ -57,12 +67,40 @@ class OverrideCheck extends Module
      * Load the configuration form
      *
      * @return string
+     * @throws Adapter_Exception
+     * @throws PrestaShopDatabaseException
+     * @throws PrestaShopException
+     * @throws ReflectionException
+     * @throws SmartyException
      */
     public function getContent()
     {
-        if ((Tools::isSubmit('viewmodule') || Tools::isSubmit('updatemodule')) && Tools::isSubmit('id_override')) {
-            $overrides = $this->findOverrides();
-
+        $overrides = $this->findOverrides();
+        if (Tools::isSubmit('deletemodule') && Tools::isSubmit('id_override')) {
+            $idOverride = Tools::getValue('id_override');
+            if (array_key_exists($idOverride, $overrides)) {
+                $override = explode('::', $overrides[$idOverride]['override']);
+                if ($this->removeMethod($override[0], $override[1])) {
+                    $this->context->controller->confirmations[] = $this->l('The override has been removed');
+                }
+            } else {
+                $this->context->controller->errors[] = $this->l('Override not found');
+            }
+        } elseif (Tools::isSubmit('submitBulkdeletemodule') && Tools::getValue('overrideBox')) {
+            $idOverrides = Tools::getValue('overrideBox');
+            $success = true;
+            foreach ($idOverrides as $idOverride) {
+                if (array_key_exists($idOverride, $overrides)) {
+                    $override = explode('::', $overrides[$idOverride]['override']);
+                    $success &= $this->removeMethod($override[0], $override[1]);
+                }
+            }
+            if ($success) {
+                $this->context->controller->confirmations[] = $this->l('The overrides have been removed');
+            } else {
+                $this->context->controller->errors[] = $this->l('Not all overrides could be removed');
+            }
+        } elseif ((Tools::isSubmit('viewmodule') || Tools::isSubmit('updatemodule')) && Tools::isSubmit('id_override')) {
             foreach ($overrides as $override) {
                 if ($override['id_override'] == Tools::getValue('id_override')) {
                     $module = $override['module_code'];
@@ -72,7 +110,7 @@ class OverrideCheck extends Module
             if (isset($module) && $module != $this->l('Unknown')) {
                 $link = Context::getContext()->link;
                 $baseUrl = $link->getAdminLink('AdminModules', true);
-                Tools::redirectAdmin($baseUrl.'&module_name='.$module.'&anchor='.Tools::ucfirst($module));
+                Tools::redirectAdmin($baseUrl.'&module_name='.$module.'&anchor='.ucfirst($module));
             }
         }
 
@@ -81,7 +119,11 @@ class OverrideCheck extends Module
 
     /**
      * @return string
+     * @throws Adapter_Exception
      * @throws PrestaShopDatabaseException
+     * @throws PrestaShopException
+     * @throws ReflectionException
+     * @throws SmartyException
      */
     protected function renderOverrideList()
     {
@@ -89,35 +131,37 @@ class OverrideCheck extends Module
         $helperList->shopLinkType = false;
 
         $overrides = $this->findOverrides();
-        $skipActions = array();
+        $skipActions = [];
         foreach ($overrides as $override) {
-            if ($override['module_code'] == $this->l('Unknown')) {
-                $skipActions['View'][] = (int) $override['id_override'];
+            if ($override['module_name'] === $this->l('Unknown') || $override['deleted']) {
+                $skipActions['view'][] = $override['id_override'];
+            }
+            if ($override['deleted']) {
+                $skipActions['delete'][] = $override['id_override'];
             }
         }
 
-        $helperList->bulk_actions = array(
-            'delete' => array(
-                'text'    => $this->l('Delete selected'),
-                'confirm' => $this->l('Delete selected items?'),
-            ),
-        );
 
         $helperList->simple_header = true;
-        $helperList->actions = array('View');
+        $helperList->actions = ['view', 'delete'];
         $helperList->list_skip_actions = $skipActions;
-        $helperList->bulk_actions = array();
+        $helperList->bulk_actions = [
+            'delete' => [
+                'text'    => $this->l('Delete selected'),
+                'confirm' => $this->l('Delete selected items?'),
+            ],
+        ];
 
         $helperList->_defaultOrderBy = 'id_override';
 
-        $fieldsList = array(
-            'id_override' => array('title' => $this->l('ID'),             'type' => 'int',      'width' => 40),
-            'override'    => array('title' => $this->l('Override'),       'type' => 'string',   'width' => 'auto'),
-            'module_code' => array('title' => $this->l('Module code'),    'type' => 'string',   'width' => 'auto'),
-            'module_name' => array('title' => $this->l('Module name'),    'type' => 'string',   'width' => 'auto'),
-            'version'     => array('title' => $this->l('Module version'), 'type' => 'string',   'width' => 'auto'),
-            'date'        => array('title' => $this->l('Installed on'),   'type' => 'datetime', 'width' => 'auto'),
-        );
+        $fieldsList = [
+            'id_override' => ['title' => $this->l('ID'),             'type' => 'int',      'width' => 40],
+            'override'    => ['title' => $this->l('Override'),       'type' => 'string',   'width' => 'auto', 'callback' => 'displayOverride',      'callback_object' => $this],
+            'module_code' => ['title' => $this->l('Module code'),    'type' => 'string',   'width' => 'auto', 'callback' => 'displayModuleCode',    'callback_object' => $this],
+            'module_name' => ['title' => $this->l('Module name'),    'type' => 'string',   'width' => 'auto'],
+            'version'     => ['title' => $this->l('Module version'), 'type' => 'string',   'width' => 'auto', 'callback' => 'displayModuleVersion', 'callback_object' => $this],
+            'date'        => ['title' => $this->l('Installed on'),   'type' => 'datetime', 'width' => 'auto'],
+        ];
 
         $helperList->list_id = 'override';
         $helperList->identifier = 'id_override';
@@ -134,14 +178,17 @@ class OverrideCheck extends Module
      * Find overrides
      *
      * @return array Overrides
+     * @throws Adapter_Exception
+     * @throws PrestaShopDatabaseException
+     * @throws PrestaShopException
+     * @throws ReflectionException
      */
     protected function findOverrides()
     {
-        $overrides = array();
+        $overrides = [];
 
         $overriddenClasses = array_keys($this->findOverriddenClasses());
 
-        $idOverride = 1;
         foreach ($overriddenClasses as $overriddenClass) {
             $reflectionClass = new ReflectionClass($overriddenClass);
             $reflectionMethods = array_filter($reflectionClass->getMethods(), function ($reflectionMethod) use ($overriddenClass) {
@@ -153,21 +200,25 @@ class OverrideCheck extends Module
             }
             $overrideFile = file($reflectionClass->getFileName());
             if (is_array($overrideFile)) {
-                $overrideFile = array_diff($overrideFile, array("\n"));
+                $overrideFile = array_diff($overrideFile, ["\n"]);
             } else {
-                $overrideFile = array();
+                $overrideFile = [];
             }
             foreach ($reflectionMethods as $reflectionMethod) {
                 /** @var ReflectionMethod $reflectionMethod */
-                $overriddenMethod = array(
-                    'id_override' => (int) $idOverride,
+                $idOverride = substr(sha1($reflectionMethod->class.'::'.$reflectionMethod->name), 0, 10);
+                $overriddenMethod = [
+                    'id_override' => $idOverride,
                     'override'    => $reflectionMethod->class.'::'.$reflectionMethod->name,
                     'module_code' => $this->l('Unknown'),
                     'module_name' => $this->l('Unknown'),
                     'date'        => $this->l('Unknown'),
                     'version'     => $this->l('Unknown'),
-                );
-                if (preg_match('/module: (.*)/ism', $overrideFile[$reflectionMethod->getStartLine() - 5], $module)
+                    'deleted'     => (Tools::isSubmit('deletemodule') && Tools::getValue( 'id_override') === $idOverride)
+                        || (Tools::isSubmit('overrideBox') && in_array($idOverride, Tools::getValue('overrideBox'))),
+                ];
+                if (isset($overrideFile[$reflectionMethod->getStartLine() - 5])
+                    && preg_match('/module: (.*)/ism', $overrideFile[$reflectionMethod->getStartLine() - 5], $module)
                     && preg_match('/date: (.*)/ism', $overrideFile[$reflectionMethod->getStartLine() - 4], $date)
                     && preg_match('/version: ([0-9.]+)/ism', $overrideFile[$reflectionMethod->getStartLine() - 3], $version)) {
                     $overriddenMethod['module_code'] = trim($module[1]);
@@ -178,8 +229,7 @@ class OverrideCheck extends Module
                     $overriddenMethod['date'] = trim($date[1]);
                     $overriddenMethod['version'] = trim($version[1]);
                 }
-                $overrides[] = $overriddenMethod;
-                $idOverride++;
+                $overrides[$idOverride] = $overriddenMethod;
             }
         }
 
@@ -201,14 +251,14 @@ class OverrideCheck extends Module
     /**
      * Retrieve recursively all classes in a directory and its subdirectories
      *
-     * @param string $path     Relative path from root to the directory
+     * @param string $path Relative path from root to the directory
      * @param bool   $hostMode
      *
      * @return array
      */
     protected function getClassesFromDir($path, $hostMode = false)
     {
-        $classes = array();
+        $classes = [];
         $rootDir = $hostMode ? $this->normalizeDirectory(_PS_ROOT_DIR_) : _PS_CORE_DIR_.'/';
 
         foreach (scandir($rootDir.$path) as $file) {
@@ -222,18 +272,18 @@ class OverrideCheck extends Module
                     $pattern = '#\W((abstract\s+)?class|interface)\s+(?P<classname>'.basename($file, '.php').'(?:Core)?)'.'(?:\s+extends\s+'.$namespacePattern.'[a-z][a-z0-9_]*)?(?:\s+implements\s+'.$namespacePattern.'[a-z][\\a-z0-9_]*(?:\s*,\s*'.$namespacePattern.'[a-z][\\a-z0-9_]*)*)?\s*\{#i';
 
                     if (preg_match($pattern, $content, $m)) {
-                        $classes[$m['classname']] = array(
+                        $classes[$m['classname']] = [
                             'path'     => $path.$file,
                             'type'     => trim($m[1]),
                             'override' => true,
-                        );
+                        ];
 
                         if (substr($m['classname'], -4) == 'Core') {
-                            $classes[substr($m['classname'], 0, -4)] = array(
+                            $classes[substr($m['classname'], 0, -4)] = [
                                 'path'     => '',
                                 'type'     => $classes[$m['classname']]['type'],
                                 'override' => true,
-                            );
+                            ];
                         }
                     }
                 }
@@ -253,5 +303,81 @@ class OverrideCheck extends Module
     protected function normalizeDirectory($directory)
     {
         return rtrim($directory, '/\\').DIRECTORY_SEPARATOR;
+    }
+
+    /**
+     * @param string $className
+     * @param string $method
+     *
+     * @return bool
+     */
+    protected function removeMethod($className, $method)
+    {
+        $success = true;
+
+        $parser = (new ParserFactory)->create(ParserFactory::PREFER_PHP5);
+        try {
+            $reflection = new ReflectionClass($className);
+            $filename = $reflection->getFileName();
+            if (strpos(realpath($filename), realpath(_PS_OVERRIDE_DIR_)) === false) {
+                $this->context->controller->errors[] = $this->l('The selected class is not an override. Please report this on GitHub, because this is a bug!');
+                return false;
+            }
+
+            $stmts = $parser->parse(file_get_contents($filename));
+            $traverser = new NodeTraverser();
+            $prettyPrinter = new StandardPrinter;
+            $traverser->addVisitor(new OverrideVisitor($method));
+            $traverser->traverse($stmts);
+            file_put_contents($filename, $prettyPrinter->prettyPrintFile($stmts));
+            @unlink(_PS_CACHE_DIR_.'class_index.php');
+        } catch (ReflectionException $e) {
+            $this->context->controller->errors[] = $this->l('Unable to remove override, could not find override file');
+            return false;
+        } catch (Error $e) {
+            $this->context->controller->errors[] = $this->l('Unable to remove override').": Parse Error: {$e->getMessage()}";
+            return false;
+        }
+
+        return $success;
+    }
+
+    /**
+     * Display an override on the list
+     *
+     * @param string $id
+     * @param string $tr
+     *
+     * @return string
+     */
+    public function displayOverride($id, $tr)
+    {
+        $removed = !empty($tr['deleted']) ? ' <div class="badge badge-danger">'.$this->l('Removed').'</div>' : '';
+
+        return "<code>$id</code>$removed";
+    }
+
+    /**
+     * Display module code
+     *
+     * @param string $id
+     *
+     * @return string
+     */
+    public function displayModuleCode($id)
+    {
+        return "<kbd>$id</kbd>";
+    }
+
+    /**
+     * Display module version
+     *
+     * @param string $id
+     *
+     * @return string
+     */
+    public function displayModuleVersion($id)
+    {
+        return "<kbd>$id</kbd>";
     }
 }

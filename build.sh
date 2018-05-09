@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 CWD_BASENAME=${PWD##*/}
 
+# Cleanup before scoping
+rm pre-scoper/ -rf
+rm vendor/ -rf
+rm build/ -rf
+
+# Composer install and scoping
+composer install --no-dev --prefer-dist
+mv vendor/ pre-scoper/
+php ./php-scoper.phar add-prefix -p ThirtyBeesOverrideCheck -n
+
+# Scoping cleanup
+mv build/pre-scoper/ vendor/
+rm pre-scoper/ -rf
+rm build/ -rf
+
+# Dump new autoloader
+composer -o dump-autoload
+
 FILES+=("logo.gif")
 FILES+=("logo.png")
 FILES+=("${CWD_BASENAME}.php")
@@ -8,6 +26,7 @@ FILES+=("classes/**")
 FILES+=("controllers/**")
 FILES+=("translations/**")
 FILES+=("upgrade/**")
+FILES+=("vendor/**")
 FILES+=("views/**")
 FILES+=("widgets/**")
 
