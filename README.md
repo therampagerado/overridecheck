@@ -4,6 +4,7 @@ Check which overrides are in use already
 
 ## Features
 - Find which overrides are already in use
+- Remove overrides with the click of a button
 
 ![Screenshot](readme/screenshot1.png?raw=true)
 
