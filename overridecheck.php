@@ -330,7 +330,7 @@ class OverrideCheck extends Module
             $traverser->addVisitor(new OverrideVisitor($method));
             $traverser->traverse($stmts);
             file_put_contents($filename, $prettyPrinter->prettyPrintFile($stmts));
-            @unlink(_PS_CACHE_DIR_.'class_index.php');
+            @unlink(_PS_ROOT_DIR_.'/'.PrestaShopAutoload::INDEX_FILE);
         } catch (ReflectionException $e) {
             $this->context->controller->errors[] = $this->l('Unable to remove override, could not find override file');
             return false;
